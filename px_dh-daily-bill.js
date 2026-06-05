@@ -33,6 +33,15 @@ const apiLimiter = rateLimit({
 
 app.use('/api', apiLimiter);
 
+function requireDebugAccess(req, res, next) {
+  if (!isProduction) return next();
+  const debugToken = process.env.DEBUG_ACCESS_TOKEN;
+  if (!debugToken) return res.status(404).json({ error: 'Not found' });
+  const provided = req.get('x-debug-token') || req.query.token;
+  if (provided !== debugToken) return res.status(403).json({ error: 'Forbidden' });
+  return next();
+}
+
 // ================= MongoDB =================
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
@@ -486,6 +495,7 @@ app.get('/daily-bill', async (req, res) => {
           // Use pm_deer and prefer active_power_total when available
           const data = await PM_deer.find({ timestamp: { $gte: start, $lte: end } })
             .sort({ timestamp: 1 })
+            .limit(10000)
             .select('active_power_total timestamp');
 
         if (!data.length) {
@@ -648,6 +658,7 @@ app.get('/daily-diff', async (req, res) => {
           const { start, end } = getDayRangeUTC(dateStr);
           const dayData = await PM_deer.find({ timestamp: { $gte: start, $lte: end } })
                            .sort({ timestamp: 1 })
+                           .limit(10000)
                           .select('active_power_total timestamp');
 
           if (!dayData.length) return { energy_kwh: 0, samples: 0, electricity_bill: 0 };
@@ -1147,7 +1158,6 @@ const pushSubscriptionSchema = new mongoose.Schema({
     auth: { type: String, required: true }
   }
 }, { timestamps: true });
-pushSubscriptionSchema.index({ endpoint: 1 }, { unique: true });
 const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema, 'push_subscriptions_deer');
 
 // สมัครรับการแจ้งเตือน
@@ -1381,7 +1391,7 @@ cron.schedule('0 0 1 * * *', () => {
 });
 
 // ================== TEST PUSH ==================
-app.get('/api/test-push', async (req, res) => {
+app.get('/api/test-push', requireDebugAccess, async (req, res) => {
   try {
     await sendPushNotification(
       '🔔 Test Push',
@@ -1441,7 +1451,8 @@ app.get('/api/notifications/daily-diff', async (req, res) => {
 
     const notifications = await DailyDiffNotification.find(query)
                           .sort({ timestamp: 1 })
-                          .limit(limit)
+                          .limit(parseInt(limit))
+                          .skip(skip)
                           .lean();
 
     const total = await DailyDiffNotification.countDocuments(query);
