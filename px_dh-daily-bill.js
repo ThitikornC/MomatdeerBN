@@ -91,7 +91,6 @@ const px_pm3250_schema = new mongoose.Schema({
 //   - meter D4:8A -> POST /esp/pm_sand -> pm_sands   (kept for records, NOT shown)
 // All dashboard/calculation endpoints read PM_deer (pm_deers / meter 00:4B).
 const PM_deer = mongoose.model('pm_deer', px_pm3250_schema);
-const PM_sand = mongoose.model('pm_sand', px_pm3250_schema);
 
 // Helper: create document from incoming payload using allowed fields and merge extras
 async function saveESPDoc(Model, payload) {
@@ -259,31 +258,6 @@ app.put('/esp/pm_deer', async (req, res) => {
   }
 });
 
-// meter D4:8A -> /esp/pm_sand -> pm_sands (kept for records, NOT shown on dashboard)
-app.post('/esp/pm_sand', async (req, res) => {
-  try {
-    const payload = req.body || {};
-    const doc = await saveESPDoc(PM_sand, payload);
-    console.log('💾 pm_sand saved:', doc._id);
-    res.status(201).json({ success: true, id: doc._id });
-  } catch (err) {
-    console.error('❌ /esp/pm_sand error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/esp/pm_sand', async (req, res) => {
-  try {
-    const payload = req.body || {};
-    const doc = await saveESPDoc(PM_sand, payload);
-    console.log('💾 pm_sand saved (PUT):', doc._id);
-    res.status(201).json({ success: true, id: doc._id });
-  } catch (err) {
-    console.error('❌ PUT /esp/pm_sand error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Recent fetch endpoint for quick testing (pm_deer)
 app.get('/esp/pm_deer/recent', async (req, res) => {
   try {
@@ -373,9 +347,7 @@ app.get('/daily-energy/:source', async (req, res) => {
     const limit = parseInt(req.query.limit) || 10000;
 
     let Model;
-    // Map source to unified pm_deer collection
-    if (source === 'pm_sand' || source === 'pm-sand') Model = PM_sand;
-    else if (source === 'pm_deer' || source === 'pm-deer' || source === 'px_pm3250') Model = PM_deer;
+    if (source === 'pm_deer' || source === 'pm-deer' || source === 'px_pm3250') Model = PM_deer;
     else return res.status(400).json({ error: 'Unknown source. Use pm_deer' });
 
     const docs = await Model.find({ timestamp: { $gte: start, $lte: end } })
@@ -1970,9 +1942,7 @@ app.get('/daily-energy/:source', async (req, res) => {
     }
 
     let Model;
-    // Map legacy and current tokens to the single pm_deer collection
-    if (source === 'pm_sand') Model = PM_sand;
-    else if (source === 'px_pm3250' || source === 'pm_deer') Model = PM_deer;
+    if (source === 'px_pm3250' || source === 'pm_deer') Model = PM_deer;
     else return res.status(400).json({ error: 'Unknown source. Use pm_deer' });
 
     const start = new Date(`${queryDate}T00:00:00Z`);
@@ -2004,8 +1974,7 @@ app.get('/esp/:source', async (req, res) => {
     // map URL source to the unified pm_deer model
     const s = source.toLowerCase();
     let Model = null;
-    if (s === 'pm_sand' || s === 'pm-sand') Model = PM_sand;
-    else if (s === 'pm_deer' || s === 'pm-deer' || s === 'px_pm3250') Model = PM_deer;
+    if (s === 'pm_deer' || s === 'pm-deer' || s === 'px_pm3250') Model = PM_deer;
     else return res.status(404).json({ error: 'Unknown source. Use pm_deer' });
 
     const docs = await Model.find().sort({ timestamp: -1 }).limit(limit).lean();
