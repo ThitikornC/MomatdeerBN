@@ -158,15 +158,9 @@ push_subscriptions
 
 ---
 
-## Known Bugs (ยังไม่แก้)
+## สิ่งที่ต้องตั้งใน Railway (manual action required)
 
-| ไฟล์ | บรรทัด | ปัญหา | ผลกระทบ |
-|------|--------|-------|---------|
-| MomayDeerBN | ~1373 | `GET /api/notifications/peak` return ตัวแปรนอก scope | crash ทันทีที่เรียก |
-| MomayDeerBN | ~1268 | `checkDailyPeak` เรียก `sendPushNotification` ขาด `type` argument | peak notification ไม่ถูกบันทึกลง DB |
-| MomayDeerBN | ~1328 | `sendDailyBillNotification` เรียก `sendPushNotification` ขาด `type` argument | daily bill notification ไม่ถูกบันทึกลง DB |
-| MomayDeerBN | ~1428, 1941 | `SIGTERM`/`SIGINT` handler ซ้ำ 2 รอบ | harmless แต่รก |
-| MomayDeerBN | ~362, 1964 | route `GET /daily-energy/:source` ซ้ำ 2 รอบ | อันที่ 2 เป็น dead code |
-| MomaySandBN | ~1478 | `GET /api/notifications/peak` ปัญหาเดียวกัน | crash ทันทีที่เรียก |
-| MomaySandBN | ~1373 | `checkDailyPeak` ขาด `type` argument เหมือนกัน | peak notification ไม่บันทึก DB |
-| MomaySandBN | ~1433 | `sendDailyBillNotification` ขาด `type` argument เหมือนกัน | daily bill ไม่บันทึก DB |
+| Repo | Environment Variables ที่ต้องตั้ง |
+|------|----------------------------------|
+| MomayDeerBN | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` |
+| MomaySandBN | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `SESSION_SECRET` |
