@@ -3,10 +3,35 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: '*' })); // สำหรับ dev เท่านั้น
+
+const isProduction = process.env.NODE_ENV === 'production';
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || !isProduction || corsOrigins.length === 0 || corsOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  }
+}));
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX || 120),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' }
+});
+
+app.use('/api', apiLimiter);
 
 // ================= MongoDB =================
 const mongoUri = process.env.MONGODB_URI;
@@ -1127,24 +1152,29 @@ const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSche
 
 // สมัครรับการแจ้งเตือน
 app.post('/api/subscribe', async (req, res) => {
-  const sub = req.body;
-  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
-    return res.status(400).json({ error: 'Invalid subscription' });
+  try {
+    const sub = req.body;
+    if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+      return res.status(400).json({ error: 'Invalid subscription' });
+    }
+
+    await PushSubscription.findOneAndUpdate(
+      { endpoint: sub.endpoint },
+      {
+        endpoint: sub.endpoint,
+        expirationTime: sub.expirationTime ? new Date(sub.expirationTime) : null,
+        keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const total = await PushSubscription.countDocuments();
+    console.log(`✅ Push subscription added (${total} total)`);
+    res.status(201).json({ message: 'Subscribed successfully' });
+  } catch (err) {
+    console.error('❌ /api/subscribe error:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  await PushSubscription.findOneAndUpdate(
-    { endpoint: sub.endpoint },
-    {
-      endpoint: sub.endpoint,
-      expirationTime: sub.expirationTime ? new Date(sub.expirationTime) : null,
-      keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-
-  const total = await PushSubscription.countDocuments();
-  console.log(`✅ Push subscription added (${total} total)`);
-  res.status(201).json({ message: 'Subscribed successfully' });
 });
 
 // ฟังก์ชันส่ง Push Notification พร้อมบันทึกลง DB แยก collection
@@ -1273,8 +1303,8 @@ async function checkDailyPeak() {
   }
 }
 
-// ตรวจสอบ peak ทุก 10 วินาที
-cron.schedule('*/10 * * * * *', () => {
+// ตรวจสอบ peak ทุก 1 นาที
+cron.schedule('* * * * *', () => {
   checkDailyPeak();
 });
 
