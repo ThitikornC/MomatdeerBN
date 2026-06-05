@@ -84,6 +84,9 @@ const px_pm3250_schema = new mongoose.Schema({
   timestamp: { type: Date, default: () => new Date(Date.now() + 7*60*60*1000) }
 }, { timestamps: true, strict: false });
 
+px_pm3250_schema.index({ timestamp: 1 });
+px_pm3250_schema.index({ mac_address: 1, timestamp: 1 });
+
 // ================= ESP PM models (use same electrical schema)
 // PM receivers will store the same detailed electrical measurements.
 // There are two physical meters on two separate endpoints:
@@ -1101,25 +1104,46 @@ app.get('/diagnostics-range', async (req, res) => {
 const webpush = require('web-push');
 const cron = require('node-cron');
 
-webpush.setVapidDetails(
-  'mailto:admin@yourdomain.com',
-  'BB2fZ3NOzkWDKOi8H5jhbwICDTv760wIB6ZD2PwmXcUA_B5QXkXtely4b4JZ5v5b88VX1jKa7kRfr94nxqiksqY',
-  'jURJII6DrBN9N_8WtNayWs4bXWDNzeb_RyjXnTxaDmo'
-);
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+const vapidSubject = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
 
-let pushSubscriptions = [];
+if (vapidPublicKey && vapidPrivateKey) {
+  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+} else {
+  console.warn('⚠️ VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — push notifications disabled');
+}
+
+const pushSubscriptionSchema = new mongoose.Schema({
+  endpoint: { type: String, required: true, unique: true },
+  expirationTime: { type: Date, default: null },
+  keys: {
+    p256dh: { type: String, required: true },
+    auth: { type: String, required: true }
+  }
+}, { timestamps: true });
+pushSubscriptionSchema.index({ endpoint: 1 }, { unique: true });
+const PushSubscription = mongoose.model('PushSubscription', pushSubscriptionSchema, 'push_subscriptions_deer');
 
 // สมัครรับการแจ้งเตือน
-app.post('/api/subscribe', (req, res) => {
+app.post('/api/subscribe', async (req, res) => {
   const sub = req.body;
-  if (!sub || !sub.endpoint) {
+  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
     return res.status(400).json({ error: 'Invalid subscription' });
   }
 
-  const exists = pushSubscriptions.find(s => s.endpoint === sub.endpoint);
-  if (!exists) pushSubscriptions.push(sub);
+  await PushSubscription.findOneAndUpdate(
+    { endpoint: sub.endpoint },
+    {
+      endpoint: sub.endpoint,
+      expirationTime: sub.expirationTime ? new Date(sub.expirationTime) : null,
+      keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
 
-  console.log(`✅ Push subscription added (${pushSubscriptions.length} total)`);
+  const total = await PushSubscription.countDocuments();
+  console.log(`✅ Push subscription added (${total} total)`);
   res.status(201).json({ message: 'Subscribed successfully' });
 });
 
@@ -1190,13 +1214,13 @@ async function sendPushNotification(title, body, type = 'test', data = {}) {
     // 2. ส่ง Push notification
     const payload = JSON.stringify({ title, body, url: '/' });
 
-    if (!pushSubscriptions.length) {
+    const subscriptions = await PushSubscription.find().lean();
+    if (!subscriptions.length) {
       console.log('⚠️ No push subscriptions to send to');
       return notification;
     }
 
-    for (let i = pushSubscriptions.length - 1; i >= 0; i--) {
-      const sub = pushSubscriptions[i];
+    for (const sub of subscriptions) {
       try {
         await webpush.sendNotification(sub, payload);
         console.log('📤 Sent notification to', sub.endpoint);
@@ -1204,7 +1228,7 @@ async function sendPushNotification(title, body, type = 'test', data = {}) {
         console.error('❌ Push send error for', sub.endpoint, err.statusCode || err);
         const status = err && err.statusCode;
         if (status === 410 || status === 404) {
-          pushSubscriptions.splice(i, 1);
+          await PushSubscription.deleteOne({ endpoint: sub.endpoint });
           console.log('🗑 Removed expired subscription', sub.endpoint);
         }
       }
@@ -1239,7 +1263,8 @@ async function checkDailyPeak() {
 
       await sendPushNotification(
         '⚡ New Daily Peak!',
-      
+        `New peak: ${powerNow.toFixed(2)} kW`,
+        'peak',
         { power: powerNow }
       );
     }
@@ -1299,11 +1324,13 @@ async function sendDailyBillNotification() {
     // ส่ง Push Notification และบันทึก
     await sendPushNotification(
       '💰 Daily Energy Report',
-    
+      `${totalEnergyKwh} kWh = ${electricityBill} THB`,
+      'daily_bill',
       {
         date: dateStr,
         energy_kwh: totalEnergyKwh,
         electricity_bill: electricityBill,
+        samples,
         rate_per_kwh: 4.4
       }
     );
@@ -1349,8 +1376,9 @@ app.get('/api/notifications/peak', async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const notifications = await PeakNotification.find(query)
-      .sort({ timestamp: 1 })
-      .limit(limit)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .skip(skip)
       .lean();
 
     const total = await PeakNotification.countDocuments(query);
@@ -1358,55 +1386,20 @@ app.get('/api/notifications/peak', async (req, res) => {
 
     res.json({
       success: true,
-      stats: {
+      type: 'peak',
+      data: notifications,
+      pagination: {
         total,
-        unread,
-        read: total - unread,
-        byType: {
-          peak: {
-            total: totalPeak,
-            unread: unreadPeak,
-            read: totalPeak - unreadPeak,
-            latest: latestPeak
-          },
-          daily_diff: {
-            total: totalDailyDiff,
-            unread: unreadDailyDiff,
-            read: totalDailyDiff - unreadDailyDiff,
-            latest: latestDailyDiff
-          },
-          daily_bill: {
-            total: totalDailyBill,
-            unread: unreadDailyBill,
-            read: totalDailyBill - unreadDailyBill,
-            latest: latestDailyBill
-          },
-          test: {
-            total: totalTest,
-            unread: unreadTest,
-            read: totalTest - unreadTest,
-            latest: latestTest
-          }
-        }
-      }
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit))
+      },
+      unreadCount
     });
   } catch (err) {
-    console.error('❌ GET /api/notifications/stats error:', err);
+    console.error('❌ GET /api/notifications/peak error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
-});
-
-// ================= Graceful Shutdown =================
-process.on('SIGTERM', async () => {
-    console.log('🔄 SIGTERM received, closing server...');
-    await mongoose.connection.close();
-    process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-    console.log('🔄 SIGINT received, closing server...');
-    await mongoose.connection.close();
-    process.exit(0);
 });
 
 // 2. ดึง Daily Diff Notifications
@@ -1910,58 +1903,6 @@ app.get('/api/notifications/stats', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-// ================= Graceful Shutdown =================
-process.on('SIGTERM', async () => {
-    console.log('🔄 SIGTERM received, closing server...');
-    await mongoose.connection.close();
-    process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-    console.log('🔄 SIGINT received, closing server...');
-    await mongoose.connection.close();
-    process.exit(0);
-});
-
-// ================= Start Server =================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📍 Health check: http://localhost:${PORT}/`);
-});
-
-// GET /daily-energy/:source
-// Example: /daily-energy/px_pm3250?date=2025-11-16
-// source can be: 'px_pm3250', 'pm_deer'
-app.get('/daily-energy/:source', async (req, res) => {
-  try {
-    const source = req.params.source;
-    const queryDate = req.query.date || new Date().toISOString().slice(0,10); // YYYY-MM-DD
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(queryDate)) {
-      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
-    }
-
-    let Model;
-    if (source === 'px_pm3250' || source === 'pm_deer') Model = PM_deer;
-    else return res.status(400).json({ error: 'Unknown source. Use pm_deer' });
-
-    const start = new Date(`${queryDate}T00:00:00Z`);
-    const end = new Date(`${queryDate}T23:59:59Z`);
-    const limit = parseInt(req.query.limit) || 10000;
-
-    // Return full documents in the legacy format so frontend doesn't need changes
-    const docs = await Model.find({ timestamp: { $gte: start, $lte: end } })
-      .sort({ timestamp: 1 })
-      .limit(limit)
-      .select('voltage current active_power_a active_power_b active_power_c active_power_phase_a active_power_phase_b active_power_phase_c active_power_total timestamp mac_address');
-
-    res.json({ message: 'Data retrieved successfully', data: docs });
-  } catch (err) {
-    console.error('❌ GET /daily-energy/:source error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Browser-friendly endpoint: GET /esp/:source
 // - Returns JSON by default: { success, count, data }
 // - If the client accepts text/html (e.g. when you paste the URL in a browser),
@@ -2025,4 +1966,24 @@ app.get('/esp/:source', async (req, res) => {
     console.error('❌ GET /esp/:source error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ================= Graceful Shutdown =================
+process.on('SIGTERM', async () => {
+    console.log('🔄 SIGTERM received, closing server...');
+    await mongoose.connection.close();
+    process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    console.log('🔄 SIGINT received, closing server...');
+    await mongoose.connection.close();
+    process.exit(0);
+});
+
+// ================= Start Server =================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📍 Health check: http://localhost:${PORT}/`);
 });
