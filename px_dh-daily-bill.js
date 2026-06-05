@@ -51,7 +51,10 @@ if (!mongoUri) {
 }
 
 mongoose.connect(mongoUri)
-  .then(() => console.log('✅ Connected to MongoDB Atlas'))
+  .then(async () => {
+    console.log('✅ Connected to MongoDB Atlas');
+    await initDailyPeak().catch(err => console.warn('⚠️ initDailyPeak failed:', err.message));
+  })
   .catch(err => {
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
@@ -1285,6 +1288,18 @@ async function sendPushNotification(title, body, type = 'test', data = {}) {
 // ================== REALTIME PEAK CHECK ==================
 let dailyPeak = { date: '', maxPower: 0 };
 
+async function initDailyPeak() {
+  const today = new Date().toISOString().split('T')[0];
+  const { start, end } = getDayRangeUTC(today);
+  const result = await PM_deer.findOne({ timestamp: { $gte: start, $lte: end } })
+    .sort({ active_power_total: -1 })
+    .select('active_power_total')
+    .lean();
+  const maxPower = result ? (docPower(result) || 0) : 0;
+  dailyPeak = { date: today, maxPower };
+  console.log(`🔁 Initialized daily peak for ${today}: ${maxPower.toFixed(2)} kW`);
+}
+
 async function checkDailyPeak() {
   try {
     const latest = await PM_deer.findOne().sort({ timestamp: -1 }).select('active_power_total timestamp');
@@ -1293,7 +1308,7 @@ async function checkDailyPeak() {
     const today = new Date().toISOString().split('T')[0];
 
     if (dailyPeak.date !== today) {
-      dailyPeak = { date: today, maxPower: 0 };
+      await initDailyPeak();
       console.log(`🔁 Reset daily peak for ${today}`);
     }
 
